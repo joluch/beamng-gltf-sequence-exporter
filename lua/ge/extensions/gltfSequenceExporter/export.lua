@@ -22,80 +22,6 @@ if not _G['__gpuFlexMesh_t_cdef'] then
     uint32_t indexCount;
     uint32_t materialId;
   } gpuPrimitive_t;
-
-  typedef struct gpuFlexMesh_t {
-    const char* meshName;
-    uint32_t primitivesCount;
-    const gpuPrimitive_t* primitives;
-  } gpuFlexMesh_t;
-
-  typedef struct gpuPropMesh_t {
-    const char* meshName;
-    float position[3];
-    float rotation[4];
-
-    uint32_t indicesCount;
-    const uint32_t* indices;
-
-    uint32_t verticesCount;
-    const float* vertices;
-
-    uint32_t normalsCount;
-    const float* normals;
-
-    uint32_t tangentsCount;
-    const float* tangents;
-
-    uint32_t uv1Count;
-    const float* uv1; // Vector2
-
-    uint32_t uv2Count;
-    const float* uv2; // Vector2
-
-    uint32_t vertColorsCount;
-    const uint32_t* vertColors; // RGB packed
-
-    uint32_t primitivesCount;
-    const gpuPrimitive_t* primitives;
-  } gpuPropMesh_t;
-
-  typedef struct gpuMesh_t {
-    uint32_t indicesCount;
-    const uint32_t* indices;
-
-    uint32_t verticesCount;
-    const float* vertices;
-
-    uint32_t normalsCount;
-    const float* normals;
-
-    uint32_t tangentsCount;
-    const float* tangents;
-
-    uint32_t uv1Count;
-    const float* uv1;
-
-    uint32_t uv2Count;
-    const float* uv2;
-
-    uint32_t vertColorsCount;
-    const uint32_t* vertColors;
-
-    uint32_t flexmeshesCount;
-    const gpuFlexMesh_t* flexmeshes;
-
-    uint32_t propmeshesCount;
-    const gpuPropMesh_t* propmeshes;
-
-    bool dataIsReady;
-  } gpuMesh_t;
-
-  const gpuMesh_t* bng_getGPUMesh(int id);
-  void bng_freeGPUMesh(int id, const gpuMesh_t* meshInfo);
-
-  const unsigned char* bng_base64_encode(const unsigned char* src, size_t len, const size_t* out_len);
-  const unsigned char* bng_base64_decode(const unsigned char* src, size_t len, const size_t* out_len);
-  void bng_base64_free(const unsigned char* buffer);
   ]]
 
   rawset(_G, '__gpuFlexMesh_t_cdef', true)
@@ -169,24 +95,26 @@ local function _addBuffer(gltfRoot, data, dataSize, name)
     bufferID = #binaryBuffers - 1
     --log('D', 'Buffers binary'..dumps(bufferID))
   else
+    local dataString = sbuffer.new()
+    dataString:set(data, dataSize)
+
     -- then we encode or write the data out
     if M.embedBuffers then
       -- log('D', 'Buffers are to be embedded.')
       -- write index buffer in base64 encoding
-      local out_len = ffi.new('size_t[1]', 0)
-      local res = ffi.C.bng_base64_encode(ffi.cast('unsigned char*', data), dataSize, out_len)
+      
+      local res = mime.b64(dataString:get())
       if not res then
         log('E', 'Unable to base64 encode buffer.')
         return
       end
       -- writeFile("test.b64", ffi.string(res))
-      buffer.uri = base64Prefix .. ffi.string(res, out_len[0])
+      buffer.uri = base64Prefix .. res
       -- log('D', 'Embedded base64-encoded buffer of length: ' .. tostring(out_len[0]))
     else
       log('D', 'Buffers are to be stored externally.')
       local binaryFilename = string.format(bufferPathPattern, bufferID, name)
-      local dataString = ffi.string(data, dataSize)
-      writeFile(binaryFilename, dataString)
+      writeFile(binaryFilename, dataString:get())
       local p, filename, ext
       p, filename, ext = path.split(binaryFilename)
       buffer.uri = filename
@@ -268,7 +196,11 @@ end
 
 local function _addIndexBuffer(gltfRoot, meshInfo)
   -- log('I', 'Mesh index count: ' .. dumps(meshInfo.indicesCount) .. ', bytes: ' .. dumps(meshInfo.indicesCount * unsignedIntByteSize))
-  return _addBuffer(gltfRoot, meshInfo.indices, meshInfo.indicesCount * unsignedIntByteSize, 'index')
+  local indices = ffi.new('unsigned int[?]', meshInfo.indicesCount)
+  if not meshInfo:indicesGet(indices) then
+    log('E', logTag, 'Cannot get indices (check that the size is right).')
+  end
+  return _addBuffer(gltfRoot, indices, meshInfo.indicesCount * unsignedIntByteSize, 'index')
 end
 
 local function _findBufferMinMax(count, buffer)
@@ -331,14 +263,14 @@ end
 
 local function _ensureResourcedFreed()
   if lastMeshInfo then
-    ffi.C.bng_freeGPUMesh(be:getPlayerVehicleID(0), lastMeshInfo)
+    lastMeshInfo:free()
     lastMeshInfo = nil
   end
 end
 
 local function _triggerExport()
   _ensureResourcedFreed()
-  lastMeshInfo = ffi.C.bng_getGPUMesh(be:getPlayerVehicleID(0))
+  lastMeshInfo = GPUMesh.bng_getGPUMesh(be:getPlayerVehicleID(0))
 end
 
 local function _findOrCreateMaterial(gltfRoot, matId)
@@ -366,26 +298,28 @@ end
 local function _addMesh(gltfRoot, attributes, indexBufferID, meshInfo, submeshInfo)
   local meshName
   if submeshInfo.meshName then
-    meshName = ffi.string(submeshInfo.meshName)
+    meshName = submeshInfo.meshName
   end
   -- log("I"," *** " .. tostring(meshName) .. ' : ' .. tostring(submeshInfo.startIndex) .. '[' .. tostring(submeshInfo.indexCount) .. ']')
   -- first: add a new bufferview and accessor
 
   local mesh = {primitives = {}}
 
+  local primitives = ffi.new('gpuPrimitive_t[?]', submeshInfo.primitivesCount)
+  if not submeshInfo:primitivesGet(primitives) then
+    log('E', logTag, 'Cannot get primitives (check that the size is right).')
+    primitives = nil
+  end
   for primI = 0, (submeshInfo.primitivesCount - 1 ) do
     -- log("I", "mesh="..dumps(meshName).." prim="..dumps(primI).."/"..dumps(submeshInfo.primitivesCount))
-    if submeshInfo.primitives == nil then goto continue end
-    local primitive = submeshInfo.primitives[primI]
+    if primitives == nil then goto continue end
+    local primitive = primitives[primI]
+    local startIndex = primitive.startIndex
+
     -- log("I", "primitive "..dumps(primitive.startIndex) .."-"..dumps(primitive.indexCount) .." max=" ..dumps(meshInfo.indicesCount) .." mat="..dumps(primitive.materialId) )
     -- find min/max triangle
-    local minIdx = math.huge
-    local maxIdx = -math.huge
-    for i = primitive.startIndex, math.min(primitive.startIndex + primitive.indexCount - 1, meshInfo.indicesCount - 1) do
-      local idx = meshInfo.indices[i]
-      minIdx = math.min(minIdx, idx)
-      maxIdx = math.max(maxIdx, idx)
-    end
+    local endIndex = math.min(startIndex + primitive.indexCount - 1, meshInfo.indicesCount - 1)
+    local minIdx, maxIdx = meshInfo:indicesMinMax(startIndex, endIndex)
 
     -- log("I", "min/max")
 
@@ -397,7 +331,7 @@ local function _addMesh(gltfRoot, attributes, indexBufferID, meshInfo, submeshIn
       type = "SCALAR",
     }
 
-    local meshIndexAccessorID = _addBufferviewAccessor(gltfRoot, indexBufferID, primitive.startIndex * unsignedIntByteSize, primitive.indexCount * unsignedIntByteSize, accessor, 'index_' .. meshName)
+    local meshIndexAccessorID = _addBufferviewAccessor(gltfRoot, indexBufferID, startIndex * unsignedIntByteSize, primitive.indexCount * unsignedIntByteSize, accessor, 'index_' .. meshName)
     -- log("I", "_addBufferviewAccessor")
 
     table.insert(mesh.primitives,
@@ -441,35 +375,59 @@ end
 local function _addMeshProp(gltfRoot, prop)
 
   local indexBufferID = _addIndexBuffer(gltfRoot, prop)
-  local vertexAccessorID = _addVec3Buffer(gltfRoot, prop.verticesCount, prop.vertices, "vertices")
+  local vertices = ffi.new('float [?]', prop.verticesCount * 3)
+  if not prop:verticesGet(vertices) then
+    log('E', logTag, 'Cannot get vertices (check that the size is right).')
+  end
+  local vertexAccessorID = _addVec3Buffer(gltfRoot, prop.verticesCount, vertices, "vertices")
   local attributes = {
     POSITION = vertexAccessorID
   }
 
   if M.exportNormals then
-    local normalAccessorID = _addVec3Buffer(gltfRoot, prop.normalsCount, prop.normals, "normals")
+     local normals = ffi.new('float [?]', prop.normalsCount * 3)
+    if not prop:normalsGet(normals) then
+      log('E', logTag, 'Cannot get normals (check that the size is right).')
+    end
+    local normalAccessorID = _addVec3Buffer(gltfRoot, prop.normalsCount, normals, "normals")
     attributes.NORMAL = normalAccessorID
   end
 
   if M.exportTangents then
-    local tangentAccessorID = _addTangentBuffer(gltfRoot, prop.tangentsCount, prop.tangents, "tangents")
+    local tangents = ffi.new('float [?]', prop.tangentsCount * 4)
+    if not prop:tangentsGet(tangents) then
+      log('E', logTag, 'Cannot get tangents (check that the size is right).')
+    end
+    local tangentAccessorID = _addTangentBuffer(gltfRoot, prop.tangentsCount, tangents, "tangents")
     attributes.TANGENT = tangentAccessorID
   end
 
   if M.exportTexCoords then
-    local texcoord1AccessorID = _addTexcoordBuffer(gltfRoot, prop.uv1Count, prop.uv1, "texcoord1")
-    local texcoord2AccessorID = _addTexcoordBuffer(gltfRoot, prop.uv2Count, prop.uv2, "texcoord2")
+    local uv1 = ffi.new('float [?]', prop.uv1Count * 2)
+    if not prop:uv1Get(uv1) then
+      log('E', logTag, 'Cannot get uv1 (check that the size is right).')
+    end
+    local uv2 = ffi.new('float [?]', prop.uv2Count * 2)
+    if not prop:uv2Get(uv2) then
+      log('E', logTag, 'Cannot get uv2 (check that the size is right).')
+    end
+    local texcoord1AccessorID = _addTexcoordBuffer(gltfRoot, prop.uv1Count, uv1, "texcoord1")
+    local texcoord2AccessorID = _addTexcoordBuffer(gltfRoot, prop.uv2Count, uv2, "texcoord2")
     attributes.TEXCOORD_0 = texcoord1AccessorID
     attributes.TEXCOORD_1 = texcoord2AccessorID
   end
 
   if M.exportColors then
-    local colorAccessorID = _addColorBuffer(gltfRoot, prop.vertColorsCount, prop.vertColors, "colors")
+    local vertColors = ffi.new('unsigned int [?]', prop.vertColorsCount * 4)
+    if not prop:vertColorsGet(vertColors) then
+      log('E', logTag, 'Cannot get vertColors (check that the size is right).')
+    end
+    local colorAccessorID = _addColorBuffer(gltfRoot, prop.vertColorsCount, vertColors, "colors")
     attributes.COLOR_0 = colorAccessorID
   end
   local nodeId = _addMesh(gltfRoot, attributes, indexBufferID, prop, prop)
-  gltfRoot.nodes[nodeId+1].translation = {prop.position[0],prop.position[2],-prop.position[1]}
-  gltfRoot.nodes[nodeId+1].rotation = {-prop.rotation[0],-prop.rotation[2],prop.rotation[1],prop.rotation[3]}
+  gltfRoot.nodes[nodeId+1].translation = {prop.position.x,prop.position.z,-prop.position.y}
+  gltfRoot.nodes[nodeId+1].rotation = {-prop.rotation.x,-prop.rotation.z,prop.rotation.y,prop.rotation.w}
   return nodeId
 end
 
@@ -480,7 +438,7 @@ local function _getPartNodeBeams(veh, v)
   for i, beam in pairs(v.vdata.beams) do
     local id1 = beam.id1
     local id2 = beam.id2
-    local part = beam.partOrigin
+    local part = beam.partPath
     if part then
       local n1 = v.vdata.nodes[id1].name
       local n2 = v.vdata.nodes[id2].name
@@ -562,7 +520,7 @@ local function _addMeshNodes(node, meshes, meshNodeMap)
   end
 end
 
-local function _createPartTree(gltfRoot, chosenParts, slotMap, partToFlexMesh, meshNodeMap, partNodeBeams, createdNodeIDs)
+local function _createPartTree(gltfRoot, vehiclePartTree, slotMap, partToFlexMesh, meshNodeMap, partNodeBeams, createdNodeIDs)
   partToFlexMesh = deepcopy(partToFlexMesh)
   gltfRoot.scenes[1].nodes = {}
 
@@ -579,26 +537,41 @@ local function _createPartTree(gltfRoot, chosenParts, slotMap, partToFlexMesh, m
   local rootNodes = {}
 
   -- log("I", "===================================  chosenParts")
+  local parentPart = {}
 
-  for part, choice in pairs(chosenParts) do
-    local node = _createOrGetNode(gltfRoot, partNodes, partNodeIDs, rootNodes, partNodeBeams, part)
-    -- log("I", dbgNodeName(gltfRoot,partNodeIDs[part]))
+  local partTreeParser
+  partTreeParser = function (partNode,parentName)
+    local node
+    if partNode.chosenPartName == "" then
+      goto continueChosenParts
+    end
+    node = _createOrGetNode(gltfRoot, partNodes, partNodeIDs, rootNodes, partNodeBeams, partNode.id )
+    -- log("I", logTag, dbgNodeName(gltfRoot,partNodeIDs[part]))
 
-    if partToFlexMesh[part] ~= nil then
-      _addMeshNodes(node, partToFlexMesh[part], meshNodeMap)
-      partToFlexMesh[part] = nil
+    if partToFlexMesh[partNode.partPath] ~= nil then
+      _addMeshNodes(node, partToFlexMesh[partNode.partPath], meshNodeMap)
+      partToFlexMesh[partNode.partPath] = nil
+      parentPart[partNode.chosenPartName] = parentName
     end
 
-    if partToFlexMesh[choice] ~= nil then
-      _addMeshNodes(node, partToFlexMesh[choice], meshNodeMap)
-      partToFlexMesh[choice] = nil
+    if partToFlexMesh[partNode.chosenPartName] ~= nil then
+      _addMeshNodes(node, partToFlexMesh[partNode.chosenPartName], meshNodeMap)
+      partToFlexMesh[partNode.chosenPartName] = nil
+      parentPart[partNode.chosenPartName] = parentName
+    end
+    ::continueChosenParts::
+    if partNode.children then
+      for _, child in pairs(partNode.children) do
+        partTreeParser(child,partNode.chosenPartName)
+      end
     end
   end
+  partTreeParser(vehiclePartTree,"scene")
 
   -- log("I", "===================================  slotMap")
 
   for part, data in pairs(slotMap) do
-    if chosenParts[part] ~= nil and chosenParts[part] ~= '' then
+    if parentPart[part] ~= nil and parentPart[part] ~= '' then
       local node = _createOrGetNode(gltfRoot, partNodes, partNodeIDs, rootNodes, partNodeBeams, part)
       -- log("I", dbgNodeName(gltfRoot,partNodeIDs[part]))
       if data.slots ~= nil then
@@ -707,11 +680,11 @@ local function _findOrCreateTexture(gltfRoot, filepath)
     return nil
   end
 
-  local _, filename, _ = path.splitWithoutExt(filepath)
+  local dir, filename, ext = path.splitWithoutExt(filepath)
 
   local image = {
     mimeType = mimeType,
-    name = filename,
+    name = filename
   }
 
   -- store path to image or store the whole image itself
@@ -882,30 +855,54 @@ local function processExport()
     indexBufferID = _addIndexBuffer(gltfRoot, lastMeshInfo)
   end
 
-  local vertexAccessorID = _addVec3Buffer(gltfRoot, lastMeshInfo.verticesCount, lastMeshInfo.vertices, "vertices")
+  local vertices = ffi.new('float [?]', lastMeshInfo.verticesCount * 3)
+  if not lastMeshInfo:verticesGet(vertices) then
+    log('E', logTag, 'Cannot get vertices (check that the size is right).')
+  end
+  local vertexAccessorID = _addVec3Buffer(gltfRoot, lastMeshInfo.verticesCount, vertices, "vertices")
   local attributes = {
     POSITION = vertexAccessorID
   }
 
   if M.exportNormals then
-    local normalAccessorID = _addVec3Buffer(gltfRoot, lastMeshInfo.normalsCount, lastMeshInfo.normals, "normals")
+    local normals = ffi.new('float [?]', lastMeshInfo.normalsCount * 3)
+    if not lastMeshInfo:normalsGet(normals) then
+      log('E', logTag, 'Cannot get normals (check that the size is right).')
+    end
+    local normalAccessorID = _addVec3Buffer(gltfRoot, lastMeshInfo.normalsCount, normals, "normals")
     attributes.NORMAL = normalAccessorID
   end
 
   if M.exportTangents then
-    local tangentAccessorID = _addTangentBuffer(gltfRoot, lastMeshInfo.tangentsCount, lastMeshInfo.tangents, "tangents")
+    local tangents = ffi.new('float [?]', lastMeshInfo.tangentsCount * 4)
+    if not lastMeshInfo:tangentsGet(tangents) then
+      log('E', logTag, 'Cannot get tangents (check that the size is right).')
+    end
+    local tangentAccessorID = _addTangentBuffer(gltfRoot, lastMeshInfo.tangentsCount, tangents, "tangents")
     attributes.TANGENT = tangentAccessorID
   end
 
   if M.exportTexCoords then
-    local texcoord1AccessorID = _addTexcoordBuffer(gltfRoot, lastMeshInfo.uv1Count, lastMeshInfo.uv1, "texcoord1")
-    local texcoord2AccessorID = _addTexcoordBuffer(gltfRoot, lastMeshInfo.uv2Count, lastMeshInfo.uv2, "texcoord2")
+    local uv1 = ffi.new('float [?]', lastMeshInfo.uv1Count * 2)
+    if not lastMeshInfo:uv1Get(uv1) then
+      log('E', logTag, 'Cannot get uv1 (check that the size is right).')
+    end
+    local uv2 = ffi.new('float [?]', lastMeshInfo.uv2Count * 2)
+    if not lastMeshInfo:uv2Get(uv2) then
+      log('E', logTag, 'Cannot get uv2 (check that the size is right).')
+    end
+    local texcoord1AccessorID = _addTexcoordBuffer(gltfRoot, lastMeshInfo.uv1Count, uv1, "texcoord1")
+    local texcoord2AccessorID = _addTexcoordBuffer(gltfRoot, lastMeshInfo.uv2Count, uv2, "texcoord2")
     attributes.TEXCOORD_0 = texcoord1AccessorID
     attributes.TEXCOORD_1 = texcoord2AccessorID
   end
 
   if M.exportColors then
-    local colorAccessorID = _addColorBuffer(gltfRoot, lastMeshInfo.vertColorsCount, lastMeshInfo.vertColors, "colors")
+        local vertColors = ffi.new('unsigned int [?]', lastMeshInfo.vertColorsCount * 4)
+    if not lastMeshInfo:vertColorsGet(vertColors) then
+      log('E', logTag, 'Cannot get vertColors (check that the size is right).')
+    end
+    local colorAccessorID = _addColorBuffer(gltfRoot, lastMeshInfo.vertColorsCount, vertColors, "colors")
     attributes.COLOR_0 = colorAccessorID
   end
 
@@ -913,14 +910,16 @@ local function processExport()
   local meshNodeMap = {}
   gltfRoot.scenes[1].nodes = {}
   for i = 0, lastMeshInfo.flexmeshesCount - 1 do
+    local flexmesh = lastMeshInfo:flexmeshes(i)
     -- log("I", "flexmesh="..dumps(i))
-    local nodeID = _addMesh(gltfRoot, attributes, indexBufferID, lastMeshInfo, lastMeshInfo.flexmeshes[i])
-    meshNodeMap[ffi.string(lastMeshInfo.flexmeshes[i].meshName)] = nodeID
+    local nodeID = _addMesh(gltfRoot, attributes, indexBufferID, lastMeshInfo, flexmesh)
+    meshNodeMap[flexmesh.meshName] = nodeID
   end
   for i = 0, lastMeshInfo.propmeshesCount - 1 do
+    local propmesh = lastMeshInfo:propmeshes(i)
     -- log("I", "propmesh="..dumps(i))
-    local nodeID = _addMeshProp(gltfRoot, lastMeshInfo.propmeshes[i])
-    meshNodeMap[ffi.string(lastMeshInfo.propmeshes[i].meshName)] = nodeID
+    local nodeID = _addMeshProp(gltfRoot, propmesh)
+    meshNodeMap[propmesh.meshName] = nodeID
   end
 
   -- map the parts to flexmeshes to allow sorting meshes according to part tree
@@ -931,21 +930,21 @@ local function processExport()
   end
   local partToFlexMesh = {}
   for _, flexMesh in pairs(v.vdata.flexbodies or {}) do
-    local origin = flexMesh.partOrigin or ""
-    if partToFlexMesh[origin] == nil then
-      partToFlexMesh[origin] = {}
+    local path = flexMesh.partPath or ""
+    if partToFlexMesh[path] == nil then
+      partToFlexMesh[path] = {}
     end
 
-    partToFlexMesh[origin][flexMesh.mesh] = true
+    partToFlexMesh[path][flexMesh.mesh] = true
   end
   for _, prop in pairs(v.vdata.props or {}) do
     -- print("prop["..dumps(_)..dumps(prop.mesh))
     if prop.mesh ~= "SPOTLIGHT" then
-      local origin = prop.partOrigin or ""
-      if partToFlexMesh[origin] == nil then
-        partToFlexMesh[origin] = {}
+      local path = prop.partPath or ""
+      if partToFlexMesh[path] == nil then
+        partToFlexMesh[path] = {}
       end
-      partToFlexMesh[origin][prop.mesh] = true
+      partToFlexMesh[path][prop.mesh] = true
       -- dump(prop)
     end
   end
@@ -959,7 +958,7 @@ local function processExport()
 
   local slotMap = jbeamIO.getAvailableParts(v.ioCtx)
 
-  local rootNodes = _createPartTree(gltfRoot, v.chosenParts, slotMap, partToFlexMesh, meshNodeMap, partNodeBeams)
+  local rootNodes = _createPartTree(gltfRoot, v.config.partsTree, slotMap, partToFlexMesh, meshNodeMap, partNodeBeams)
 
 
   -- create the root node as the final node
